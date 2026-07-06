@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-release-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-release-${{ runner.os }}-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Resolve version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Run native unit tests
+        run: pio test -e native
+
+      - name: Build release firmware
+        env:
+          FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          pio run -e esp32-c61-softap -e esp32-c61-ble
+
+      - name: Package release artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          DIST="dist/${VERSION}"
+          mkdir -p "$DIST"
+
+          cp .pio/build/esp32-c61-softap/firmware.factory.bin \
+            "$DIST/esp32-c61-softap.factory.bin"
+          cp .pio/build/esp32-c61-softap/firmware.bin \
+            "$DIST/esp32-c61-softap.firmware.bin"
+          cp .pio/build/esp32-c61-ble/firmware.factory.bin \
+            "$DIST/esp32-c61-ble.factory.bin"
+          cp .pio/build/esp32-c61-ble/firmware.bin \
+            "$DIST/esp32-c61-ble.firmware.bin"
+
+          (cd "$DIST" && sha256sum *.bin > SHA256SUMS)
+
+          python3 - <<'PY'
+          import json, os
+          version = os.environ["VERSION"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          manifest = {
+              "version": version,
+              "tag": tag,
+              "chip": "esp32c61",
+              "board": "esp32-c61-devkitc1-n8r2",
+              "artifacts": {
+                  "softap_factory": "esp32-c61-softap.factory.bin",
+                  "softap_firmware": "esp32-c61-softap.firmware.bin",
+                  "ble_factory": "esp32-c61-ble.factory.bin",
+                  "ble_firmware": "esp32-c61-ble.firmware.bin",
+              },
+              "flash": {
+                  "chip": "esp32c61",
+                  "offset": "0x0",
+                  "recommended": "esp32-c61-softap.factory.bin",
+              },
+          }
+          path = f"dist/{version}/manifest.json"
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PY
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.version.outputs.version }}/*
